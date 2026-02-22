@@ -1,11 +1,17 @@
 import sqlite3
-import requests
-from config import DB_PATH, TELEGRAM_TOKEN, CHAT_ID
+from config import DB_PATH, TELEGRAM_TOKEN
 
-
-# ===============================
-# LOAD SIGNALS FROM DATABASE
-# ===============================
+from telegram import ReplyKeyboardMarkup, Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+# =========================
+# LOAD DATA
+# =========================
 def load_signals():
     conn = sqlite3.connect(DB_PATH)
 
@@ -14,9 +20,9 @@ def load_signals():
            rvol, atr, volume, value
     FROM signals
     WHERE date = (SELECT MAX(date) FROM signals)
-    ORDER BY rvol DESC
+    ORDER BY value DESC
+    LIMIT 10
     """
-
     cursor = conn.cursor()
     cursor.execute(query)
     rows = cursor.fetchall()
@@ -24,16 +30,60 @@ def load_signals():
 
     return rows
 
+# =========================
+# LOAD PERFORMANCE
+# =========================
+def load_performance():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
 
-# ===============================
+    query = """
+    SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'CLOSED_TP' THEN 1 ELSE 0 END) as win,
+        AVG(CASE WHEN status = 'CLOSED_TP' THEN percent_result END) as avg_gain,
+        AVG(CASE WHEN status = 'CLOSED_SL' THEN percent_result END) as avg_loss
+    FROM signals
+    WHERE status IN ('CLOSED_TP', 'CLOSED_SL')
+    """
+
+    cursor.execute(query)
+    row = cursor.fetchone()
+    conn.close()
+
+    return row
+# =========================
+# LOAD CLOSED
+# =========================
+def load_closed():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    query = """
+    SELECT ticker, signal_type, entry, stop_loss, take_profit,
+           percent_result, exit_date
+    FROM signals
+    WHERE status IN ('CLOSED_TP', 'CLOSED_SL')
+    ORDER BY exit_date DESC
+    LIMIT 10
+    """
+
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    conn.close()
+
+    return rows
+
+
+# =========================
 # FORMAT MESSAGE
-# ===============================
-def format_message(signals):
+# =========================
+def format_open(signals):
     if not signals:
-        return "📭 Tidak ada sinyal breakout hari ini."
+        return "📭 <b>Tidak ada sinyal breakout hari ini.</b>"
 
-    message = "🚀 *IDX Breakout Scanner*\n"
-    message += "==========================\n\n"
+    message = "<b>📂 OPEN SIGNALS</b>\n"
+    message += "━━━━━━━━━━━━━━━━━━\n\n"
 
     for row in signals:
         (
@@ -46,64 +96,138 @@ def format_message(signals):
             rvol,
             atr,
             volume,
-            value
+            value,
         ) = row
 
-        # Safety fallback (hindari None crash)
         entry = entry or 0
         stop = stop or 0
         tp = tp or 0
-        rvol = rvol or 0
-        atr = atr or 0
-        volume = volume or 0
-        value = value or 0
 
-        message += f"📈 *{ticker}* ({signal_type})\n"
+        message += f"<b>{ticker}</b> ({signal_type})\n"
         message += f"Entry : {entry:,.2f}\n"
         message += f"SL    : {stop:,.2f}\n"
         message += f"TP    : {tp:,.2f}\n"
-        message += f"RVOL  : {rvol:.2f}\n"
-        message += f"ATR   : {atr:,.2f}\n"
-        message += f"Vol   : {volume:,.0f}\n"
-        message += f"Value : {value/1_000_000_000:,.2f} B\n"
-        message += "--------------------------\n"
+        message += "━━━━━━━━━━━━━━━━━━\n"
+
+    return message
+# =========================
+# FORMAT CLOSED
+# =========================
+def format_closed(rows):
+    if not rows:
+        return "📭 <b>No closed trades yet.</b>"
+
+    message = "✅ <b>CLOSED SIGNALS</b>\n"
+    message += "──────────────────\n\n"
+
+    for row in rows:
+        ticker, signal_type, entry, sl, tp, percent, exit_date = row
+
+        message += f"<b>{ticker}</b> ({signal_type})\n"
+        message += f"Entry : {entry:.2f}\n"
+        message += f"SL    : {sl:.2f}\n"
+        message += f"TP    : {tp:.2f}\n"
+        message += f"Result: {percent:.2f}%\n"
+        message += f"Exit  : {exit_date}\n"
+        message += "──────────────────\n"
 
     return message
 
-# ===============================
-# SEND TO TELEGRAM
-# ===============================
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+# =========================
+# PERFORMA MESSAGE
+# =========================
+def format_performance():
+    data = load_performance()
 
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": None
-    }
+    if not data:
+        return "📊 <b>No performance data yet.</b>"
 
-    response = requests.post(url, data=payload)
-    return response.json()
+    total, win, avg_gain, avg_loss = data
 
-# ====================================
-# RUN WRAPPER
-# ====================================
+    win = win or 0
+    total = total or 0
+    avg_gain = avg_gain or 0
+    avg_loss = avg_loss or 0
 
-def run():
-    print("Loading signals...")
-    signals = load_signals()
+    winrate = (win / total * 100) if total > 0 else 0
 
-    print("Formatting message...")
-    message = format_message(signals)
+    message = "<b>📊 PERFORMANCE SUMMARY</b>\n"
+    message += "━━━━━━━━━━━━━━\n"
+    message += f"Total Trades : {total}\n"
+    message += f"Winrate      : {winrate:.2f}%\n"
+    message += f"Avg Gain     : {avg_gain:.2f}%\n"
+    message += f"Avg Loss     : {avg_loss:.2f}%\n"
 
-    print("Sending to Telegram...")
-    result = send_telegram(message)
+    return message
 
-    print("Telegram send completed.")
-    print(result)
 
-# ===============================
+# =========================
+# MENU
+# =========================
+def main_menu():
+    keyboard = [
+        ["📂 Open Signals"],
+        ["✅ Closed Signals"],
+        ["📊 Performance"],
+        ["🚪 Exit"]
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True
+    )
+
+
+# =========================
+# START COMMAND
+# =========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🚀 IDX Breakout System\n\nSelect menu:",
+        reply_markup=main_menu()
+    )
+
+# =========================
+# BUTTON HANDLER
+# =========================
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if text == "📂 Open Signals":
+        signals = load_signals()
+        message = format_open(signals)
+        await update.message.reply_text(message, parse_mode="HTML")
+
+    elif text == "✅ Closed Signals":
+        rows = load_closed()
+        message = format_closed(rows)
+        await update.message.reply_text(message, parse_mode="HTML")
+
+    elif text == "📊 Performance":
+        message = format_performance()
+        await update.message.reply_text(message, parse_mode="HTML")
+
+    elif text == "🚪 Exit":
+        from telegram import ReplyKeyboardRemove
+        await update.message.reply_text(
+            "Menu closed.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+# =========================
 # MAIN
-# ===============================
+# =========================
+def main():
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .build()
+    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
+
+    print("Bot running...")
+    app.run_polling()
+
 if __name__ == "__main__":
-    run()
+    main()
