@@ -10,7 +10,6 @@ from fetch_data import run as run_fetch
 from trade_manager import run as run_trade
 from calculate import run as run_calculate
 from signal_engine import run as run_signal
-from telegram_bot import run as run_telegram
 
 
 def main():
@@ -49,13 +48,6 @@ def main():
         print("\n[4/5] Generating new signals...")
         run_signal()
         print("✓ Signal generation completed")
-
-        # =========================
-        # 5️⃣ SEND TELEGRAM REPORT
-        # =========================
-        print("\n[5/5] Sending Telegram report...")
-        run_telegram()
-        print("✓ Telegram report sent")
 
         print("\n🎉 DAILY PIPELINE FINISHED SUCCESSFULLY")
 

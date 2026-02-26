@@ -1,6 +1,5 @@
 import sqlite3
 from config import DB_PATH
-from telegram_bot import send_telegram
 
 
 # ======================================
@@ -157,7 +156,6 @@ def update_positions():
                     f"📈 Result : {percent_result:.2f}%\n"
                 )
 
-                send_telegram(message)
 
                 print(f"{ticker} closed with {status}")
 
